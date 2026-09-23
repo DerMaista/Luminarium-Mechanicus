@@ -86,6 +86,49 @@ Rendered as ASCII, `@` head through `.` tail:
 re-themes live. The effect does the same, picking up a new palette on the next
 frame — no restart, no flag.
 
+### Surviving suspend
+
+Come back from `systemctl suspend` and the motherboard headers and the mouse
+are running their firmware's own rainbow again, while the DRAM still shows the
+comet. Nothing crashed: the socket, the server's hidraw handles and the effect
+process all survive the sleep untouched, and the frames never stopped. Suspend
+cuts power to those two controllers, they boot into the mode their firmware
+holds, and a controller running an onboard effect ignores direct LED writes.
+The DRAM modules sit on standby power throughout, never reset, and so never
+notice.
+
+What the hardware forgot is the mode. `Direct` is sent once at startup, and
+losing it silently voids every frame after. Measured, not assumed: with the
+effect still streaming, sending the two sleepers nothing but a mode switch
+brought the comets back mid-flight.
+
+So the effect re-sends it on resume -- which first has to be noticed.
+CLOCK_MONOTONIC, the clock `time.Since` reads, stops while the machine is
+suspended; the wall clock, kept by the RTC, does not. A Go `time.Time` carries
+both readings, so the time spent asleep is simply the difference between them:
+
+```go
+func slept(from, to time.Time) time.Duration {
+	return to.Round(0).Sub(from.Round(0)) - to.Sub(from)
+}
+```
+
+More than a second of it across a frame boundary means a resume, and every
+driven device gets `Direct` again before that frame is drawn:
+
+```
+resumed after 8h54m0s asleep, re-asserting direct mode
+```
+
+No DBus, no logind, and no root unit hooking `sleep.target` to reach into the
+user manager -- which is the kind of dependency the module went out of its way
+not to need. A false positive would cost one mode packet and show nothing, so
+the threshold errs low.
+
+The animation clock is monotonic too, so it did not advance while suspended:
+the comets pick up where the machine left them instead of jumping forward by
+the length of the sleep. `rgb rainbow` gets the same treatment.
+
 ### Autostart
 
 The NixOS module starts it — `rgb-comet.service`, a `systemd --user` unit

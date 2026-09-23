@@ -267,6 +267,25 @@ func resize(c *openrgb.Client, d *openrgb.Device, zone, count int) error {
 	return nil
 }
 
+func slept(from, to time.Time) time.Duration {
+	return to.Round(0).Sub(from.Round(0)) - to.Sub(from)
+}
+
+const resumeGap = time.Second
+
+func setDirect(c *openrgb.Client, devices []*openrgb.Device) error {
+	for _, d := range devices {
+		m, ok := d.DirectMode()
+		if !ok {
+			continue
+		}
+		if err := c.SetMode(d.Index, m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type stage struct {
 	dev *openrgb.Device
 	eff effect.Effect
@@ -288,15 +307,18 @@ func runEffect(c *openrgb.Client, devices []*openrgb.Device, def effect.Def, pal
 			fmt.Fprintf(os.Stderr, "skipping %s: 0 leds, needs `rgb resize`\n", d.Name)
 			continue
 		}
-		if m, ok := d.DirectMode(); ok {
-			if err := c.SetMode(d.Index, m); err != nil {
-				return err
-			}
-		}
 		stages = append(stages, stage{dev: d, eff: def.New(len(d.LEDs)), buf: make([]openrgb.Color, len(d.LEDs))})
 	}
 	if len(stages) == 0 {
 		return fmt.Errorf("no device has any LEDs to drive")
+	}
+
+	driven := make([]*openrgb.Device, len(stages))
+	for i, s := range stages {
+		driven[i] = s.dev
+	}
+	if err := setDirect(c, driven); err != nil {
+		return err
 	}
 
 	draw := func(t float64) error {
@@ -336,6 +358,7 @@ func runEffect(c *openrgb.Client, devices []*openrgb.Device, def effect.Def, pal
 	fmt.Printf("%s across %d device(s), following %s, Ctrl-C to stop\n", def.Name, len(stages), palettePath)
 
 	start := time.Now()
+	last := start
 	for {
 		select {
 		case <-stop:
@@ -350,7 +373,17 @@ func runEffect(c *openrgb.Client, devices []*openrgb.Device, def effect.Def, pal
 				}
 			}
 		case <-frames:
-			if err := draw(time.Since(start).Seconds() * speed); err != nil {
+			now := time.Now()
+			if gap := slept(last, now); gap > resumeGap {
+				fmt.Printf("resumed after %s asleep, re-asserting direct mode\n", gap.Round(time.Second))
+				if err := setDirect(c, driven); err != nil {
+					return err
+				}
+			}
+			last = now
+			// Monotonic, so it did not advance while suspended: the comets
+			// carry on from where the machine left them rather than jumping.
+			if err := draw(now.Sub(start).Seconds() * speed); err != nil {
 				return err
 			}
 		}
@@ -361,12 +394,8 @@ func rainbow(c *openrgb.Client, devices []*openrgb.Device, fps int, speed float6
 	if fps < 1 {
 		fps = 1
 	}
-	for _, d := range devices {
-		if m, ok := d.DirectMode(); ok {
-			if err := c.SetMode(d.Index, m); err != nil {
-				return err
-			}
-		}
+	if err := setDirect(c, devices); err != nil {
+		return err
 	}
 
 	stop := make(chan os.Signal, 1)
@@ -376,13 +405,22 @@ func rainbow(c *openrgb.Client, devices []*openrgb.Device, fps int, speed float6
 
 	fmt.Printf("rainbow across %d device(s) at %d fps, Ctrl-C to stop\n", len(devices), fps)
 	start := time.Now()
+	last := start
 	for {
 		select {
 		case <-stop:
 			fmt.Println("\nstopping")
 			return nil
 		case <-tick.C:
-			base := time.Since(start).Seconds() * speed
+			now := time.Now()
+			if gap := slept(last, now); gap > resumeGap {
+				fmt.Printf("resumed after %s asleep, re-asserting direct mode\n", gap.Round(time.Second))
+				if err := setDirect(c, devices); err != nil {
+					return err
+				}
+			}
+			last = now
+			base := now.Sub(start).Seconds() * speed
 			for _, d := range devices {
 				colors := make([]openrgb.Color, len(d.LEDs))
 				for i := range colors {
