@@ -60,25 +60,6 @@ Nothing about a comet is fixed. Every launch draws its own:
 | brightness | 70–100% of the way up the ramp, so some run dimmer |
 | wait until the next | `0.12s + Exp(0.9s)` |
 
-The wait is exponential, which gives Poisson arrivals — clusters and lulls
-rather than an evenly spaced procession. Comets overlap freely; where two meet,
-the brighter wins rather than summing, which would blow past `primary` and
-flatten both tails.
-
-Rates and tails are fractions of each device's *own* length, so a 40-LED header
-and a 4-LED mouse take about the same time to cross and read as the same effect.
-Each device also gets its own generator, so they drift apart instead of firing
-in unison. A comet enters from just off the end, so it arrives tail-last rather
-than appearing whole — which is why the strip is briefly dark at startup.
-
-Rendered as ASCII, `@` head through `.` tail:
-
-```
- 1.20s |=+*#%@:--==+**#%%@                      | 2 in flight
- 1.52s |::--==*##%@    .:---==+*##%@@           | 2 in flight
- 1.92s |      ::--=+*#%%@           .::--===+*#%| 2 in flight
- 2.32s |           .:--==+*#%%@                 | 1 in flight
-```
 
 ### Following theme changes
 
@@ -128,6 +109,30 @@ the threshold errs low.
 The animation clock is monotonic too, so it did not advance while suspended:
 the comets pick up where the machine left them instead of jumping forward by
 the length of the sleep. `rgb rainbow` gets the same treatment.
+
+### Devices that show up late
+
+At boot only the DRAM lit up, for as long as the session lasted. The server
+starts answering before detection has finished, and the i2c scan that finds
+the DRAM runs ahead of the HID one that finds the motherboard and the mouse.
+The effect's third attempt (the first two saw no devices at all) caught the
+list at two, and it never asked again:
+
+```
+comet across 2 device(s), following …/colors.json, Ctrl-C to stop
+```
+
+So the effect re-reads the list every 2s: a device-count round trip, which
+also drains any `DEVICE_LIST_UPDATED` notice the server pushed in the
+meantime. When either moved, it fetches the devices again, re-applies `-d` or
+`-name`, and sends `Direct` to all of them. Devices it was already driving keep
+their comets; new ones start their own clock, so they too fill in from the end
+rather than jumping in mid-stream.
+
+```
+comet across 2 device(s), following …/colors.json, Ctrl-C to stop
+device list changed: driving 4 of 4 device(s)
+```
 
 ### Autostart
 
@@ -198,29 +203,6 @@ so the client needs no flag either way. `-addr` takes both forms:
 ./rgb list -addr 127.0.0.1:6742
 ```
 
-### Why both halves share one unit
-
-`JoinsNamespaceOf=` does **not** share a network namespace between two
-`systemd --user` units. Configured that way, the bridge reports
-`PrivateNetwork=yes` and `JoinsNamespaceOf=` in `systemctl show`, yet its
-`/proc/PID/ns/net` is the *host* namespace — it silently reaches the host's port
-instead of the isolated one. Measured, not assumed: with the backend stopped, a
-query through the socket still returned the host server's devices.
-
-`PrivateNetwork` itself works fine in user units, including socket-activated
-ones. Only the cross-unit sharing fails. Hence one unit running both processes.
-
-Network isolation does not touch USB, hidraw or i2c, so detection still finds
-everything — verified inside the namespace, all four devices present.
-
-## This machine
-
-| # | Device | How | LEDs |
-|---|---|---|---|
-| 0,1 | ENE DRAM ×2 | SMBus `/dev/i2c-13` @ `0x71`, `0x73` | 8 each |
-| 2 | ASUS ROG STRIX B850-I (AURA) | HID `/dev/hidraw9` | 2 ARGB headers |
-| 3 | SteelSeries Aerox 9 Wireless | HID `/dev/hidraw3` | 4 zones |
-
 ### ARGB headers need a length
 
 Addressable strips carry no "how long am I" signal, so OpenRGB reports **0 LEDs**
@@ -235,14 +217,6 @@ Over-declaring is harmless (surplus pixels go nowhere); under-declaring leaves t
 tail of the chain dark. The size persists in the config of whichever server you
 talked to — a root server stores it under `/var/lib/OpenRGB`, yours under
 `~/.config/OpenRGB`, and switching between them looks like the resize was lost.
-
-### The GPU has no OpenRGB support
-
-The card is a PowerColor RX 9070 XT — PCI `1002:7550`, subsystem `148c:2435`.
-Its i2c buses *are* exposed (`AMDGPU SMU 0/1`, `AMDGPU DM i2c hw bus 0-3`) and
-OpenRGB scans them during "Detecting I2C PCI devices", but finds no controller:
-OpenRGB matches GPUs by PCI subsystem ID against per-board drivers, and there is
-no entry for this Navi 48 board. Nothing to configure — it needs upstream support.
 
 ## NixOS
 

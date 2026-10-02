@@ -76,8 +76,8 @@ const (
 	cometMaxRate = 0.95
 	cometMinTail = 0.18
 	cometMaxTail = 0.50
-	cometMinPeak = 0.70
-	cometMaxPeak = 1.00
+	cometMinPeak = 0.50
+	cometMaxPeak = 0.70
 
 	cometMaxCatchUp = 64
 )

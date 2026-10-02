@@ -141,8 +141,9 @@ func (d *Device) DirectMode() (Mode, bool) {
 }
 
 type Client struct {
-	conn     net.Conn
-	protocol uint32
+	conn        net.Conn
+	protocol    uint32
+	listUpdated bool
 }
 
 func Dial(addr, name string) (*Client, error) {
@@ -221,11 +222,18 @@ func (c *Client) recv(want uint32) ([]byte, error) {
 		case want:
 			return data, nil
 		case pktDeviceListUpdated:
+			c.listUpdated = true
 			continue
 		default:
 			return nil, fmt.Errorf("unexpected packet %d, want %d", pkt, want)
 		}
 	}
+}
+
+func (c *Client) ListUpdated() bool {
+	u := c.listUpdated
+	c.listUpdated = false
+	return u
 }
 
 func (c *Client) DeviceCount() (int, error) {

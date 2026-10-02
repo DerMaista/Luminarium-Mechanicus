@@ -104,7 +104,10 @@ func run(args []string) error {
 		if !ok {
 			return fmt.Errorf("unknown effect %q; try `rgb effect list`", arg)
 		}
-		return runEffect(c, targets, def, *palette, *fps, *speed)
+		pick := func(all []*openrgb.Device) ([]*openrgb.Device, error) {
+			return selectDevices(all, *device, *name)
+		}
+		return runEffect(c, targets, pick, def, *palette, *fps, *speed)
 	case "resize":
 		if *zone < 0 || *count < 0 {
 			return fmt.Errorf("resize needs -z <zone> -n <led count>")
@@ -290,9 +293,46 @@ type stage struct {
 	dev *openrgb.Device
 	eff effect.Effect
 	buf []openrgb.Color
+	t0  float64
 }
 
-func runEffect(c *openrgb.Client, devices []*openrgb.Device, def effect.Def, palettePath string, fps int, speed float64) error {
+const deviceRecheck = 2 * time.Second
+
+func sameDevice(a, b *openrgb.Device) bool {
+	return a.Name == b.Name && a.Location == b.Location && a.Serial == b.Serial && len(a.LEDs) == len(b.LEDs)
+}
+
+func stagesFor(devices []*openrgb.Device, prev []stage, def effect.Def, t float64) []stage {
+	var out []stage
+	for _, d := range devices {
+		if len(d.LEDs) == 0 {
+			fmt.Fprintf(os.Stderr, "skipping %s: 0 leds, needs `rgb resize`\n", d.Name)
+			continue
+		}
+		s := stage{dev: d, buf: make([]openrgb.Color, len(d.LEDs))}
+		for _, p := range prev {
+			if sameDevice(p.dev, d) {
+				s.eff, s.t0 = p.eff, p.t0
+				break
+			}
+		}
+		if s.eff == nil {
+			s.eff, s.t0 = def.New(len(d.LEDs)), t
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func driven(stages []stage) []*openrgb.Device {
+	out := make([]*openrgb.Device, len(stages))
+	for i, s := range stages {
+		out[i] = s.dev
+	}
+	return out
+}
+
+func runEffect(c *openrgb.Client, devices []*openrgb.Device, pick func([]*openrgb.Device) ([]*openrgb.Device, error), def effect.Def, palettePath string, fps int, speed float64) error {
 	pal, err := theme.Load(palettePath)
 	if err != nil {
 		return err
@@ -301,29 +341,17 @@ func runEffect(c *openrgb.Client, devices []*openrgb.Device, def effect.Def, pal
 		fps = 1
 	}
 
-	var stages []stage
-	for _, d := range devices {
-		if len(d.LEDs) == 0 {
-			fmt.Fprintf(os.Stderr, "skipping %s: 0 leds, needs `rgb resize`\n", d.Name)
-			continue
-		}
-		stages = append(stages, stage{dev: d, eff: def.New(len(d.LEDs)), buf: make([]openrgb.Color, len(d.LEDs))})
-	}
+	stages := stagesFor(devices, nil, def, 0)
 	if len(stages) == 0 {
 		return fmt.Errorf("no device has any LEDs to drive")
 	}
-
-	driven := make([]*openrgb.Device, len(stages))
-	for i, s := range stages {
-		driven[i] = s.dev
-	}
-	if err := setDirect(c, driven); err != nil {
+	if err := setDirect(c, driven(stages)); err != nil {
 		return err
 	}
 
 	draw := func(t float64) error {
 		for _, s := range stages {
-			s.eff.Render(pal, s.buf, t)
+			s.eff.Render(pal, s.buf, t-s.t0)
 			if err := c.UpdateLEDs(s.dev.Index, s.buf); err != nil {
 				return err
 			}
@@ -338,6 +366,36 @@ func runEffect(c *openrgb.Client, devices []*openrgb.Device, def effect.Def, pal
 		fmt.Printf("%s across %d device(s)  [%s]\n", def.Name, len(stages), pal)
 		return nil
 	}
+
+	known, err := c.DeviceCount()
+	if err != nil {
+		return err
+	}
+	refresh := func(t float64) error {
+		n, err := c.DeviceCount()
+		if err != nil {
+			return err
+		}
+		if !c.ListUpdated() && n == known {
+			return nil
+		}
+		known = n
+		all, err := c.Devices()
+		if err != nil {
+			return err
+		}
+		targets, err := pick(all)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "device list changed: %v\n", err)
+			targets = nil
+		}
+		stages = stagesFor(targets, stages, def, t)
+		fmt.Printf("device list changed: driving %d of %d device(s)\n", len(stages), len(all))
+		return setDirect(c, driven(stages))
+	}
+
+	recheck := time.NewTicker(deviceRecheck)
+	defer recheck.Stop()
 
 	palCh, stopWatch := theme.Watch(palettePath, 500*time.Millisecond)
 	defer stopWatch()
@@ -372,17 +430,19 @@ func runEffect(c *openrgb.Client, devices []*openrgb.Device, def effect.Def, pal
 					return err
 				}
 			}
+		case <-recheck.C:
+			if err := refresh(time.Since(start).Seconds() * speed); err != nil {
+				return err
+			}
 		case <-frames:
 			now := time.Now()
 			if gap := slept(last, now); gap > resumeGap {
 				fmt.Printf("resumed after %s asleep, re-asserting direct mode\n", gap.Round(time.Second))
-				if err := setDirect(c, driven); err != nil {
+				if err := setDirect(c, driven(stages)); err != nil {
 					return err
 				}
 			}
 			last = now
-			// Monotonic, so it did not advance while suspended: the comets
-			// carry on from where the machine left them rather than jumping.
 			if err := draw(now.Sub(start).Seconds() * speed); err != nil {
 				return err
 			}
